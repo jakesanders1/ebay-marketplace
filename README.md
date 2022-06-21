@@ -1,94 +1,96 @@
-    const explicitRefunds: Boolean = true;
+main :: IO ()
+main = printJSON $ contract
 
-    const buyer: Party = Role("Buyer");
-    const seller: Party = Role("Seller");
-    const burnAddress: Party = PK("addr1{stockpicka}");
+explicitRefunds :: Bool
+explicitRefunds = False
 
-    const price: Value = ConstantParam("Price");
-    const collateral: Value = ConstantParam("Collateral amount");
+seller, buyer, burnAddress :: Party
+buyer = Role "Buyer"
+seller = Role "Seller"
+burnAddress = PK "addr1Stockpicka"
 
-    const sellerCollateralTimeout: Timeout = TimeParam("Collateral deposit by seller timeout");
-    const buyerCollateralTimeout: Timeout = TimeParam("Deposit of collateral by buyer timeout");
-    const depositTimeout: Timeout = TimeParam("Deposit of price by buyer timeout");
-    const disputeTimeout: Timeout = TimeParam("Dispute by buyer timeout");
-    const answerTimeout: Timeout = TimeParam("Complaint deadline"); -- Can be set
+price, collateral :: Value
+price = ConstantParam "Price"
+collateral = ConstantParam "Collateral amount"
 
-    function depositCollateral(party: Party, timeout: Timeout, timeoutContinuation: Contract, continuation: Contract): Contract {
-        return When([Case(Deposit(party, party, ada, collateral), continuation)],
-            timeout,
-            timeoutContinuation);
-    }
+sellerCollateralTimeout, buyerCollateralTimeout, depositTimeout, disputeTimeout, answerTimeout :: Timeout
+sellerCollateralTimeout = TimeParam "Collateral deposit by seller timeout"
+buyerCollateralTimeout = TimeParam "Deposit of collateral by buyer timeout"
+depositTimeout = TimeParam "Deposit of price by buyer timeout"
+disputeTimeout = TimeParam "Dispute by buyer timeout"
+answerTimeout = TimeParam "Complaint deadline"
 
-    function burnCollaterals(continuation: Contract): Contract {
-        return Pay(seller, Party(burnAddress), ada, collateral,
-            Pay(buyer, Party(burnAddress), ada, collateral,
-                continuation));
-    }
+depositCollateral :: Party -> Timeout -> Contract -> Contract -> Contract
+depositCollateral party timeout timeoutContinuation continuation =
+    When [Case (Deposit party party ada collateral) continuation]
+         timeout
+         timeoutContinuation
 
-    function deposit(timeout: Timeout, timeoutContinuation: Contract, continuation: Contract): Contract {
-        return When([Case(Deposit(seller, buyer, ada, price), continuation)],
-            timeout,
-            timeoutContinuation);
-    }
+burnCollaterals :: Contract -> Contract
+burnCollaterals =
+    Pay seller (Party burnAddress) ada collateral
+    . Pay buyer (Party burnAddress) ada collateral
 
-    function choice(choiceName: string, chooser: Party, choiceValue: SomeNumber, continuation: Contract): Case {
-        return Case(Choice(ChoiceId(choiceName, chooser),
-            [Bound(choiceValue, choiceValue)]),
-            continuation);
-    }
+deposit :: Timeout -> Contract -> Contract -> Contract
+deposit timeout timeoutContinuation continuation =
+    When [Case (Deposit seller buyer ada price) continuation]
+         timeout
+         timeoutContinuation
 
-    function choices(timeout: Timeout, chooser: Party, timeoutContinuation: Contract, list: { value: SomeNumber, name: string, continuation: Contract }[]): Contract {
-        var caseList: Case[] = new Array(list.length);
-        list.forEach((element, index) =>
-            caseList[index] = choice(element.name, chooser, element.value, element.continuation)
-        );
-        return When(caseList, timeout, timeoutContinuation);
-    }
+choice :: ChoiceName -> Party -> Integer -> Contract -> Case
+choice choiceName chooser choiceValue = Case (Choice (ChoiceId choiceName chooser)
+                                                     [Bound choiceValue choiceValue])
 
-    function sellerToBuyer(continuation: Contract): Contract {
-        return Pay(seller, Account(buyer), ada, price, continuation);
-    }
+choices :: Timeout -> Party -> Contract -> [(Integer, ChoiceName, Contract)] -> Contract
+choices timeout chooser timeoutContinuation list =
+    When [choice choiceName chooser choiceValue continuation
+          | (choiceValue, choiceName, continuation) <- list]
+         timeout
+         timeoutContinuation
 
-    function refundSellerCollateral(continuation: Contract): Contract {
-        if (explicitRefunds) {
-            return Pay(seller, Party(seller), ada, collateral, continuation);
-        } else {
-            return continuation;
-        }
-    }
+sellerToBuyer :: Contract -> Contract
+sellerToBuyer = Pay seller (Account buyer) ada price
 
-    function refundBuyerCollateral(continuation: Contract): Contract {
-        if (explicitRefunds) {
-            return Pay(buyer, Party(buyer), ada, collateral, continuation);
-        } else {
-            return continuation;
-        }
-    }
+refundSellerCollateral :: Contract -> Contract
+refundSellerCollateral
+  | explicitRefunds = Pay seller (Party seller) ada collateral
+  | otherwise = id
 
-    function refundCollaterals(continuation: Contract): Contract {
-        return refundSellerCollateral(refundBuyerCollateral(continuation));
-    }
+refundBuyerCollateral :: Contract -> Contract
+refundBuyerCollateral
+  | explicitRefunds = Pay buyer (Party buyer) ada collateral
+  | otherwise = id
 
-    const refundBuyer: Contract = explicitRefunds ? Pay(buyer, Party(buyer), ada, price, Close) : Close;
+refundCollaterals :: Contract -> Contract
+refundCollaterals = refundSellerCollateral . refundBuyerCollateral
 
-    const refundSeller: Contract = explicitRefunds ? Pay(seller, Party(seller), ada, price, Close) : Close;
+refundBuyer :: Contract
+refundBuyer
+ | explicitRefunds = Pay buyer (Party buyer) ada price Close
+ | otherwise = Close
 
-    const contract: Contract =
-        depositCollateral(seller, sellerCollateralTimeout, Close,
-            depositCollateral(buyer, buyerCollateralTimeout, refundSellerCollateral(Close),
-                deposit(depositTimeout, refundCollaterals(Close),
-                    choices(disputeTimeout, buyer, refundCollaterals(refundSeller),
-                        [{ value: 0n, name: "I recieved my product", continuation: refundCollaterals(refundSeller) },
-                        {
-                            value: 1n, name: "Report an issue",
-                            continuation:
-                                sellerToBuyer(
-                                    choices(answerTimeout, seller, refundCollaterals(refundBuyer),
-                                        [{ value: 1n, name: "Confirm issue", continuation: refundCollaterals
-                                        { value: 0n, name: "Dispute issue", continuation: burnCollaterals -- Need to make it send to your wallet
-                        }]))));
+refundSeller :: Contract
+refundSeller
+ | explicitRefunds = Pay seller (Party seller) ada price Close
+ | otherwise = Close
 
-    return contract;
-
-
-})
+contract :: Contract
+contract = depositCollateral seller sellerCollateralTimeout Close $
+           depositCollateral buyer buyerCollateralTimeout (refundSellerCollateral Close) $
+           deposit depositTimeout (refundCollaterals Close) $
+           choices disputeTimeout buyer (refundCollaterals refundSeller)
+              [ (0, "I recieved my product"
+                , refundCollaterals refundSeller
+                )
+              , (1, "Report an issue"
+                , sellerToBuyer $
+                  choices answerTimeout seller (refundCollaterals refundBuyer)
+                     [ (1, "Confirm issue"
+                       , refundCollaterals refundBuyer
+                       )
+                     , (0, "Dispute issue"
+                       , burnCollaterals refundBuyer
+                       )
+                     ]
+                )
+              ]
