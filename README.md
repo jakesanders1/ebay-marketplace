@@ -1,4 +1,3 @@
-main :: IO ()
 main = printJSON $ contract
 
 explicitRefunds :: Bool
